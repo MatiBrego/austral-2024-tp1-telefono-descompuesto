@@ -13,6 +13,7 @@ interface RelayApiService {
      * @param signatures  (required)
      * @param xGameTimestamp  (optional)
      * @return mensaje recibido y reenviado. (status code 200)
+     *         or mensaje recibido, pero no te digo si lo envié o nó. (status code 202)
      *         or Tu reloj atrasa... (status code 400)
      *         or Los bits se perdieron en el multiverso (status code 503)
      * @see RelayApi#relayMessage

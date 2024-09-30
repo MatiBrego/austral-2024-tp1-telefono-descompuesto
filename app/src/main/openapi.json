@@ -50,12 +50,37 @@
         ],
         "responses": {
           "200": {
-            "description": "Todo bien",
-            "headers": {
-              "X-Game-Timestamp": {
-                "$ref": "#/components/headers/X-Game-Timestamp"
+            "description": "Todo bien. Nueva registración. Listo para jugar.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/registerResponse"
+                }
               }
-            },
+            }
+          },
+          "202": {
+            "description": "Un cliente recurrente. Registración existente pero válida. Listo para jugar.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/registerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Tenés algún error de parámetros",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/registerResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Estás tratando de estafarme... El UUID ya existe pero mandaste la clave incorrecta.",
             "content": {
               "application/json": {
                 "schema": {
@@ -89,8 +114,18 @@
           }
         ],
         "responses": {
-          "200": {
+          "202": {
             "description": "Sashay Away",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "User error, replace user.",
             "content": {
               "application/json": {
                 "schema": {
@@ -215,6 +250,16 @@
         "responses": {
           "200": {
             "description": "mensaje recibido y reenviado.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/signature"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "mensaje recibido, pero no te digo si lo envié o nó.",
             "content": {
               "application/json": {
                 "schema": {
@@ -356,7 +401,8 @@
         "required": [
           "nextHost",
           "nextPort",
-          "timeout"
+          "timeout",
+          "xGameTimestamp"
         ],
         "properties": {
           "nextHost": {
@@ -366,6 +412,10 @@
             "type": "integer"
           },
           "timeout": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "xGameTimestamp": {
             "type": "integer",
             "minimum": 0
           }

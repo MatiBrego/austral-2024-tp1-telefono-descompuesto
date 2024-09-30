@@ -4,12 +4,12 @@ import ar.edu.austral.inf.sd.server.api.PlayApiService
 import ar.edu.austral.inf.sd.server.api.RegisterNodeApiService
 import ar.edu.austral.inf.sd.server.api.RelayApiService
 import ar.edu.austral.inf.sd.server.api.BadRequestException
+import ar.edu.austral.inf.sd.server.api.ReconfigureApiService
+import ar.edu.austral.inf.sd.server.api.UnregisterNodeApiService
 import ar.edu.austral.inf.sd.server.api.InternalServerErrorException
 import ar.edu.austral.inf.sd.server.api.NotFoundException
-import ar.edu.austral.inf.sd.server.api.ReconfigureApiService
 import ar.edu.austral.inf.sd.server.api.ServiceUnavailableException
 import ar.edu.austral.inf.sd.server.api.TimeOutException
-import ar.edu.austral.inf.sd.server.api.UnregisterNodeApiService
 import ar.edu.austral.inf.sd.server.model.Node
 import ar.edu.austral.inf.sd.server.model.PlayResponse
 import ar.edu.austral.inf.sd.server.model.RegisterResponse
@@ -64,11 +64,10 @@ class ApiServicesImpl @Autowired constructor(
     // Participant's data
     private var nextNode: RegisterResponse? = null
     private val messageDigest = MessageDigest.getInstance("SHA-512")
-    private val mySalt = newSalt()
+    private val mySalt = Base64.getEncoder().encodeToString(Random.nextBytes(9))
     private val myUUID = newUUID()
 
     private var myTimestamp: Int = 0
-    private var nextTimestamp: Int? = null
     private var nextNodeAfterNextTimestamp: RegisterResponse? = null
 
     // Current play's data
@@ -83,18 +82,18 @@ class ApiServicesImpl @Autowired constructor(
         Base64.getDecoder().decode(salt)
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
-            val me = RegisterResponse(myServerHost, myServerPort, timeout)
+            val me = RegisterResponse(myServerHost, myServerPort, timeout, currentXGameTimestamp)
             val meNode = Node(myServerHost, myServerPort, myServerName, myUUID, mySalt)
             nodes.add(meNode)
             me
         } else {
             val lastNode = nodes.last()
-            RegisterResponse(lastNode.host, lastNode.port, timeout)
+            RegisterResponse(lastNode.host, lastNode.port, timeout, currentXGameTimestamp)
         }
         val node = Node(host!!, port!!, name!!, uuid!!, salt!!)
         nodes.add(node)
 
-        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeout)
+        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeout, currentXGameTimestamp)
     }
 
     override fun relayMessage(message: String, signatures: Signatures, xGameTimestamp: Int?): Signature {
@@ -134,7 +133,7 @@ class ApiServicesImpl @Autowired constructor(
 
         val expectedSignatures = generateExpectedSignatures(body, nodes, contentType)
 
-        sendRelayMessage(body, contentType, toRegisterResponse(nodes.last()), Signatures(listOf()), currentXGameTimestamp)
+        sendRelayMessage(body, contentType, toRegisterResponse(nodes.last(), -1), Signatures(listOf()), currentXGameTimestamp)
         resultReady.await(timeout.toLong(), TimeUnit.SECONDS)
         resultReady = CountDownLatch(1)
 
@@ -189,7 +188,8 @@ class ApiServicesImpl @Autowired constructor(
 
             val registerNodeResponse: RegisterResponse = response.body!!
             println("nextNode = $registerNodeResponse")
-            nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, timeout) }
+            myTimestamp = registerNodeResponse.xGameTimestamp
+            nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, timeout, registerNodeResponse.xGameTimestamp) }
         } catch (e: RestClientException){
             print("Could not register to: $registerUrl")
         }
@@ -200,11 +200,10 @@ class ApiServicesImpl @Autowired constructor(
             throw BadRequestException("Invalid timestamp")
         }
 
-        if (nextTimestamp != null && timestamp >= nextTimestamp!!) {
-            myTimestamp = nextTimestamp as Int
+        if (nextNodeAfterNextTimestamp != null && timestamp >= nextNodeAfterNextTimestamp!!.xGameTimestamp) {
+            myTimestamp = nextNodeAfterNextTimestamp!!.xGameTimestamp
             nextNode = nextNodeAfterNextTimestamp
 
-            nextTimestamp = null
             nextNodeAfterNextTimestamp = null
         }
 
@@ -258,18 +257,19 @@ class ApiServicesImpl @Autowired constructor(
         Signatures(listOf())
     )
 
-    private fun doHash(body: ByteArray, salt: String):  String {
+    private fun doHash(body: ByteArray, salt: String): String {
         val saltBytes = Base64.getDecoder().decode(salt)
         messageDigest.update(saltBytes)
         val digest = messageDigest.digest(body)
         return Base64.getEncoder().encodeToString(digest)
     }
 
-    private fun toRegisterResponse(node: Node): RegisterResponse {
+    private fun toRegisterResponse(node: Node, timestamp: Int): RegisterResponse {
         return RegisterResponse(
             node.host,
             node.port,
-            timeout
+            timeout,
+            timestamp
         )
     }
 
@@ -284,7 +284,6 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     companion object {
-        fun newSalt(): String = Base64.getEncoder().encodeToString(Random.nextBytes(9))
         fun newUUID(): UUID = UUID.randomUUID()
     }
 
@@ -299,8 +298,7 @@ class ApiServicesImpl @Autowired constructor(
             throw BadRequestException("Invalid data")
         }
 
-        nextNodeAfterNextTimestamp = RegisterResponse(nextHost!!, nextPort!!, timeout)
-        nextTimestamp = xGameTimestamp
+        nextNodeAfterNextTimestamp = RegisterResponse(nextHost!!, nextPort!!, timeout, xGameTimestamp!!)
         return "Reconfigured node $myUUID"
     }
 
@@ -313,7 +311,7 @@ class ApiServicesImpl @Autowired constructor(
             throw NotFoundException("Node with uuid: $uuid not found")
         }
 
-        if (nodeToUnregister!!.salt != salt){
+        if (nodeToUnregister.salt != salt){
              throw BadRequestException("Invalid data")
         }
 
