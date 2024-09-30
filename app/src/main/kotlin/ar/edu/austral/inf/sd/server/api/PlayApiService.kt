@@ -14,7 +14,7 @@ interface PlayApiService {
      *         or Faltan firmas. (status code 500)
      *         or Yo mandé peras y recibí bananas (status code 503)
      *         or La red telefónica falló, no me contestaron. (status code 504)
-     * @see PlayApi#sendMessage
+     * @see PlayApi#play
      */
-    fun sendMessage(body: kotlin.String): PlayResponse
+    fun play(body: kotlin.String): PlayResponse
 }
