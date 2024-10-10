@@ -10,12 +10,12 @@ import ar.edu.austral.inf.sd.server.api.InternalServerErrorException
 import ar.edu.austral.inf.sd.server.api.NotFoundException
 import ar.edu.austral.inf.sd.server.api.ServiceUnavailableException
 import ar.edu.austral.inf.sd.server.api.TimeOutException
+import ar.edu.austral.inf.sd.server.api.UnauthorizedException
 import ar.edu.austral.inf.sd.server.model.Node
 import ar.edu.austral.inf.sd.server.model.PlayResponse
 import ar.edu.austral.inf.sd.server.model.RegisterResponse
 import ar.edu.austral.inf.sd.server.model.Signature
 import ar.edu.austral.inf.sd.server.model.Signatures
-import io.swagger.v3.oas.models.security.SecurityScheme.In
 import jakarta.annotation.PreDestroy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
@@ -24,20 +24,24 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.http.HttpEntity
 import org.springframework.http.HttpHeaders
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
+import org.springframework.http.ResponseEntity
 import org.springframework.stereotype.Component
 import org.springframework.util.LinkedMultiValueMap
-import org.springframework.web.client.HttpServerErrorException.InternalServerError
 import org.springframework.web.client.RestClientException
 import org.springframework.web.client.RestTemplate
 import org.springframework.web.client.postForEntity
 import org.springframework.web.context.request.RequestContextHolder
 import org.springframework.web.context.request.ServletRequestAttributes
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.*
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
+import kotlin.system.exitProcess
 
 @Component
 class ApiServicesImpl @Autowired constructor(
@@ -51,12 +55,14 @@ class ApiServicesImpl @Autowired constructor(
     private val myServerHost: String = "localhost"
     @Value("\${server.port:8080}")
     private val myServerPort: Int = 0
-    @Value("\${timeout:20}")
+    @Value("\${server.timeout:20}")
     private val timeout: Int = 20
     @Value("\${register.host:}")
     var registerHost: String = ""
     @Value("\${register.port:-1}")
     var registerPort: Int = -1
+
+    private var timeOuts = 0
 
     // Coordinator's list of nodes
     private val nodes: MutableList<Node> = mutableListOf()
@@ -64,8 +70,10 @@ class ApiServicesImpl @Autowired constructor(
     // Participant's data
     private var nextNode: RegisterResponse? = null
     private val messageDigest = MessageDigest.getInstance("SHA-512")
-    private val mySalt = Base64.getEncoder().encodeToString(Random.nextBytes(9))
+    private val mySalt = Base64.getUrlEncoder().encodeToString(Random.nextBytes(9)) // Use UrlEncoder for url safe base64
     private val myUUID = newUUID()
+    private var myTimeout = -1
+
 
     private var myTimestamp: Int = 0
     private var nextNodeAfterNextTimestamp: RegisterResponse? = null
@@ -78,8 +86,26 @@ class ApiServicesImpl @Autowired constructor(
     private var currentMessageResponse = MutableStateFlow<PlayResponse?>(null)
     private var currentXGameTimestamp = 0
 
-    override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): RegisterResponse {
-        Base64.getDecoder().decode(salt)
+    override fun registerNode(host: String?, port: Int?, uuid: UUID?, salt: String?, name: String?): ResponseEntity<RegisterResponse> {
+        println("Received salt: $salt")
+        try {
+            Base64.getUrlDecoder().decode(salt) // This Url Decoding violates protocol, but it seems to work consistently this way.
+        } catch (e: IllegalArgumentException) {
+            throw BadRequestException("Could not decode salt as Base64")
+        }
+
+
+        val existingNode = nodes.find { it.uuid == uuid }
+        if (existingNode != null) {
+            if (existingNode.salt == salt) {
+                val nextNodeIndex = nodes.indexOf(existingNode) - 1
+                val nextNode = nodes[nextNodeIndex]
+                return ResponseEntity(RegisterResponse(nextNode.host, nextNode.port, timeout, currentXGameTimestamp), HttpStatus.ACCEPTED)
+            } else {
+                throw UnauthorizedException("Invalid salt")
+            }
+        }
+
         val nextNode = if (nodes.isEmpty()) {
             // es el primer nodo
             val me = RegisterResponse(myServerHost, myServerPort, timeout, currentXGameTimestamp)
@@ -93,7 +119,7 @@ class ApiServicesImpl @Autowired constructor(
         val node = Node(host!!, port!!, name!!, uuid!!, salt!!)
         nodes.add(node)
 
-        return RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeout, currentXGameTimestamp)
+        return ResponseEntity(RegisterResponse(nextNode.nextHost, nextNode.nextPort, timeout, currentXGameTimestamp), HttpStatus.OK)
     }
 
     override fun relayMessage(message: String, signatures: Signatures, xGameTimestamp: Int?): Signature {
@@ -122,6 +148,8 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     override fun play(body: String): PlayResponse {
+        if (timeOuts >= 10) throw BadRequestException("Game is closed")
+
         if (nodes.isEmpty()) {
             // inicializamos el primer nodo como yo mismo
             val me = Node(myServerHost, myServerPort, myServerName, myUUID, mySalt)
@@ -137,16 +165,17 @@ class ApiServicesImpl @Autowired constructor(
         resultReady.await(timeout.toLong(), TimeUnit.SECONDS)
         resultReady = CountDownLatch(1)
 
-        if (currentMessageWaiting.value != null){
+        if (currentMessageResponse.value == null){
+            timeOuts += 1
             throw TimeOutException("Last relay was not received on time")
+        }
+
+        if (doHash(body.encodeToByteArray(),  mySalt) != currentMessageResponse.value!!.receivedHash){
+            throw ServiceUnavailableException("Received different hash than original")
         }
 
         if (!compareSignatures(expectedSignatures, currentMessageResponse.value!!.signatures)){
             throw InternalServerErrorException("Missing signatures")
-        }
-
-        if (currentMessageWaiting.value!!.originalHash != currentMessageWaiting.value!!.receivedHash){
-            throw ServiceUnavailableException("Received different hash than original")
         }
 
         return currentMessageResponse.value!!
@@ -178,6 +207,7 @@ class ApiServicesImpl @Autowired constructor(
     }
 
     internal fun registerToServer(registerHost: String, registerPort: Int) {
+        println("My salt: $mySalt")
         val registerUrl = "http://$registerHost:$registerPort/register-node"
         val registerParams = "?host=localhost&port=$myServerPort&name=$myServerName&uuid=$myUUID&salt=$mySalt&name=$myServerName"
         val url = registerUrl + registerParams
@@ -189,9 +219,14 @@ class ApiServicesImpl @Autowired constructor(
             val registerNodeResponse: RegisterResponse = response.body!!
             println("nextNode = $registerNodeResponse")
             myTimestamp = registerNodeResponse.xGameTimestamp
+            myTimeout = registerNodeResponse.timeout
             nextNode = with(registerNodeResponse) { RegisterResponse(nextHost, nextPort, timeout, registerNodeResponse.xGameTimestamp) }
         } catch (e: RestClientException){
-            print("Could not register to: $registerUrl")
+            println("Could not register to: $registerUrl")
+            println("Params: $registerParams")
+            println("Error: ${e.message}")
+            println("Shutting down")
+            exitProcess(1)
         }
     }
 
@@ -200,14 +235,17 @@ class ApiServicesImpl @Autowired constructor(
             throw BadRequestException("Invalid timestamp")
         }
 
+        val nextNodeUrl: String
         if (nextNodeAfterNextTimestamp != null && timestamp >= nextNodeAfterNextTimestamp!!.xGameTimestamp) {
             myTimestamp = nextNodeAfterNextTimestamp!!.xGameTimestamp
             nextNode = nextNodeAfterNextTimestamp
 
             nextNodeAfterNextTimestamp = null
+            nextNodeUrl = "http://${nextNode!!.nextHost}:${nextNode!!.nextPort}/relay"
+        } else {
+            nextNodeUrl = "http://${relayNode.nextHost}:${relayNode.nextPort}/relay"
         }
 
-        val nextNodeUrl = "http://${relayNode.nextHost}:${relayNode.nextPort}/relay"
 
         val messageHeaders = HttpHeaders().apply { setContentType(MediaType.parseMediaType(contentType)) }
         val messagePart = HttpEntity(body, messageHeaders)
@@ -258,7 +296,7 @@ class ApiServicesImpl @Autowired constructor(
     )
 
     private fun doHash(body: ByteArray, salt: String): String {
-        val saltBytes = Base64.getDecoder().decode(salt)
+        val saltBytes = Base64.getUrlDecoder().decode(salt)
         messageDigest.update(saltBytes)
         val digest = messageDigest.digest(body)
         return Base64.getEncoder().encodeToString(digest)
@@ -329,7 +367,7 @@ class ApiServicesImpl @Autowired constructor(
             val requestHeaders = HttpHeaders().apply {
                 add("X-Game-Timestamp", currentXGameTimestamp.toString())
             }
-            val request = HttpEntity(requestHeaders.toMap())
+            val request = HttpEntity(null, requestHeaders)
 
             try {
                 restTemplate.postForEntity<String>(url, request)
